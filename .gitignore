@@ -7,3 +7,9 @@ Thumbs.db
 
 # Local-only files (pilot IDs, callsigns, secrets)
 docs/private/
+
+# Local agent/tool settings and key material
+.claude/settings.local.json
+.mcp.json
+*.pem
+*.key

@@ -19,3 +19,8 @@ BMAD skills are installed for Claude Code (`.claude/skills`) and Codex (`.agents
 ## Seed documents
 
 - [`docs/pocket-pilots-api-notes.md`](docs/pocket-pilots-api-notes.md) – observed notes on the Pocket Pilots web API (unofficial, undocumented, may change)
+
+## License
+
+Released under the [MIT License](LICENSE). Bundled BMAD Method files are
+MIT-licensed by BMad Code, LLC; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
