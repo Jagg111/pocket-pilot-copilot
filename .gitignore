@@ -4,3 +4,6 @@ Thumbs.db
 *.log
 .env
 .env.*
+
+# Local-only files (pilot IDs, callsigns, secrets)
+docs/private/

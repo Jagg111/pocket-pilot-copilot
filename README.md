@@ -15,3 +15,7 @@ BMAD skills are installed for Claude Code (`.claude/skills`) and Codex (`.agents
 - `_bmad/` – BMAD configuration and assets
 - `_bmad-output/` – planning and implementation artifacts
 - `docs/` – long-term project knowledge and seed technical notes
+
+## Seed documents
+
+- [`docs/pocket-pilots-api-notes.md`](docs/pocket-pilots-api-notes.md) – observed notes on the Pocket Pilots web API (unofficial, undocumented, may change)
