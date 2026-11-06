@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Our Airports</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--line:#ddd;--bad:#c0392b;--warn:#b9770e;--ok:#1e8449}
+@media (prefers-color-scheme:dark){:root{--bg:#161616;--fg:#eee;--mut:#999;--line:#333;--bad:#ff6b5b;--warn:#f0b34a;--ok:#5fd08a}}
+body{font:15px system-ui,sans-serif;background:var(--bg);color:var(--fg);margin:0;padding:16px;max-width:900px;margin-inline:auto}
+header{display:flex;gap:12px;align-items:center;flex-wrap:wrap}h1{font-size:20px;margin:0}
+button{font:inherit;padding:6px 14px;cursor:pointer}#meta{color:var(--mut)}
+table{width:100%;border-collapse:collapse;margin-top:12px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}.lost{color:var(--bad);font-weight:600}.held{color:var(--warn)}.safe{color:var(--ok)}
+.wrap{overflow-x:auto}
+</style></head><body>
+<header><h1>Our airports</h1><button id="go">Refresh</button><span id="meta">Not loaded yet. Press Refresh.</span></header>
+<div class="wrap"><table><thead><tr><th>Airport</th><th>Holder</th><th class="n">Value</th><th>Runner-up</th><th class="n">Margin</th><th>Status</th></tr></thead><tbody id="rows"></tbody></table></div>
+<script>
+const $=id=>document.getElementById(id), usd=n=>n==null?'':'$'+Number(n).toLocaleString();
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const who=(n,t)=>esc(n)+(t?` [${esc(t)}]`:'');
+function render(s){
+  if(s.panel){
+    $('rows').innerHTML=s.panel.rows.map(r=>{
+      const st=r.status==='lost'?'LOST: behind by':r.status==='safe'?'No competitors (safe)':r.status==='error'?esc(r.note):'Held';
+      return `<tr><td>${esc(r.code)}</td><td>${r.holder?who(r.holder,r.holder_tag):''}</td><td class="n">${usd(r.value)}</td>`+
+        `<td>${r.runner_up?who(r.runner_up,r.runner_up_tag)+' '+usd(r.runner_up_value):''}</td>`+
+        `<td class="n">${r.margin==null?'':usd(r.margin)}</td><td class="${r.status}">${st}</td></tr>`}).join('');
+  }
+  const p=s.progress||[0,0];
+  const asof=s.panel?` · showing data as of ${new Date(s.panel.as_of*1000).toLocaleTimeString()}`:'';
+  $('meta').textContent=s.running?`Refreshing… ${p[0]}/${p[1]} airports`:s.error?'Error: '+s.error+asof:
+    s.panel?`${s.panel.held_count} airports held · data as of ${new Date(s.panel.as_of*1000).toLocaleTimeString()}`:'Not loaded yet. Press Refresh.';
+  $('go').disabled=s.running;
+}
+async function poll(){
+  try{const s=await (await fetch('/api/panel')).json();render(s);if(s.running)setTimeout(poll,1500)}
+  catch(e){$('meta').textContent='Cannot reach the local server.';$('go').disabled=false}
+}
+$('go').onclick=async()=>{
+  $('go').disabled=true;
+  try{await fetch('/api/refresh',{method:'POST',headers:{'X-Panel':'1'}})}catch(e){}
+  poll()
+};
+poll();
+</script></body></html>
