@@ -13,3 +13,6 @@ docs/private/
 .mcp.json
 *.pem
 *.key
+__pycache__/
+*.pyc
+panel/.cache/

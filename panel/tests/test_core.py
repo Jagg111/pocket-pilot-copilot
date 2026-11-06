@@ -113,5 +113,89 @@ class Guards(unittest.TestCase):
         self.assertEqual(core.describe_error(urllib.error.HTTPError("u", 404, "x", None, None)), "HTTP 404")
 
 
+class Risk(unittest.TestCase):
+    def test_thresholds(self):
+        self.assertEqual([core.risk_level(m) for m in (0, 1999, 2000, 4999, 5000)],
+                         ["urgent", "urgent", "at_risk", "at_risk", "ok"])
+
+    def test_summary_counts(self):
+        rows = [core.build_row("A", ME, st(("1", 1500), ("2", 100))),    # margin 1400 urgent
+                core.build_row("B", ME, st(("1", 4000), ("2", 100))),    # 3900 at_risk
+                core.build_row("C", ME, st(("1", 9000), ("2", 100))),    # ok
+                core.build_row("D", ME, st(("1", 100))),                 # safe
+                core.build_row("E", ME, st(("2", 100), ("1", 50))),      # lost
+                {"code": "F", "status": "error", "risk": "error", "note": "x"}]
+        self.assertEqual(core.summarize(rows),
+                         {"lost": 1, "urgent": 1, "at_risk": 1, "ok": 1, "safe": 1, "error": 1})
+
+    def test_runner_up_has_no_value(self):
+        self.assertNotIn("runner_up_value", core.build_row("A", ME, st(("1", 500), ("2", 100))))
+
+
+class Cache(unittest.TestCase):
+    def test_roundtrip_and_company_mismatch(self):
+        import tempfile
+        import server
+        with tempfile.TemporaryDirectory() as d:
+            server.CACHE_FILE = Path(d) / ".cache" / "panel.json"
+            self.assertIsNone(server.load_cache(ME))
+            panel = core.build_panel(ME, fetch=lambda p: {"held": {"A": {"co": "1"}}} if "/co" in p
+                                     else st(("1", 300), ("2", 100)), sleep=lambda s: None)
+            server.save_cache(panel)
+            self.assertEqual(server.load_cache(ME)["held_count"], 1)
+            self.assertIsNone(server.load_cache("other"))
+
+
+class Rivals(unittest.TestCase):
+    def test_rival_ranking_and_holds(self):
+        feeds = {"/api/air/co2": {"held": {"X": {}, "Y": {}, "Z": {}}}, "/api/air/co3": {"held": {"Q": {}}}}
+
+        def fetch(path):
+            if path == "/api/air/co1":
+                return {"held": {c: {"co": "1"} for c in "ABCD"},
+                        "flights": [{"from": {"code": "A", "name": "Alpha Field"}, "to": {}}]}
+            if path in feeds:
+                return feeds[path]
+            code = path.split("=")[1]
+            return {"A": st(("1", 1000), ("2", 100)), "B": st(("1", 3000), ("2", 100)),
+                    "C": st(("1", 9000), ("3", 100)), "D": st(("3", 500), ("1", 100))}[code]
+        names = {}
+        p = core.build_panel(ME, fetch=fetch, sleep=lambda s: None, names=names)
+        r2, r3 = p["rivals"]
+        self.assertEqual((r2["id"], r2["runner_up"], r2["urgent"], r2["at_risk"], r2["holds"]), ("2", 2, 1, 1, 3))
+        self.assertEqual((r3["id"], r3["runner_up"], r3["took"], r3["holds"]), ("3", 1, 1, 1))
+        self.assertEqual(next(r for r in p["rows"] if r["code"] == "A")["name"], "Alpha Field")
+
+    def test_rival_fetch_failure_leaves_holds_unknown(self):
+        def fetch(path):
+            if path == "/api/air/co1":
+                return {"held": {"A": {"co": "1"}}}
+            if path.startswith("/api/standings"):
+                return st(("1", 1000), ("2", 100))
+            raise OSError("down")
+        p = core.build_panel(ME, fetch=fetch, sleep=lambda s: None)
+        self.assertIsNone(p["rivals"][0]["holds"])
+
+
+class AirportNames(unittest.TestCase):
+    def test_csv_ident_wins_over_alternate_codes(self):
+        import fetch_airport_names as f
+        csv_text = "\n".join(["ident,name,gps_code,local_code",
+                              "KAAA,First Field,,",
+                              "ZZZ1,Other Field,KAAA,LCL1", ""])
+        names = f.build(csv_text)
+        self.assertEqual((names["KAAA"], names["LCL1"], names["ZZZ1"]), ("First Field", "Other Field", "Other Field"))
+
+    def test_base_names_fill_rows_and_game_names_win(self):
+        def fetch(path):
+            if path == "/api/air/co1":
+                return {"held": {"A": {"co": "1"}, "B": {"co": "1"}},
+                        "flights": [{"from": {"code": "A", "name": "Game Name"}, "to": {}}]}
+            return st(("1", 1000), ("2", 100))
+        p = core.build_panel(ME, fetch=fetch, sleep=lambda s: None, base_names={"A": "Base A", "B": "Base B"})
+        got = {r["code"]: r["name"] for r in p["rows"]}
+        self.assertEqual(got, {"A": "Game Name", "B": "Base B"})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,9 @@ BASE = "https://pilots.nimblebit.com"
 REQUEST_SPACING_S = 1.0
 MAX_TRIES = 3
 MAX_CONSECUTIVE_FAILURES = 3
+TOP_COMPETITORS = 3  # extra /api/air/co<id> calls per refresh
+URGENT_BELOW = 2000
+AT_RISK_BELOW = 5000
 
 
 def user_agent():
@@ -59,6 +62,52 @@ def held_codes(co_feed, company_id):
     return sorted(c for c, h in held.items() if str(h.get("co", cid)) == cid)
 
 
+def risk_level(margin):
+    """urgent below $2,000, at_risk below $5,000, else ok."""
+    if margin < URGENT_BELOW:
+        return "urgent"
+    if margin < AT_RISK_BELOW:
+        return "at_risk"
+    return "ok"
+
+
+def summarize(rows):
+    counts = {"lost": 0, "urgent": 0, "at_risk": 0, "ok": 0, "safe": 0, "error": 0}
+    for r in rows:
+        counts[r.get("risk") or "error"] += 1
+    return counts
+
+
+def collect_names(feed, names):
+    """Harvest airport names (code -> name) seen in a /api/air/* payload. No extra calls."""
+    def take(a):
+        if isinstance(a, dict) and a.get("code") and a.get("name"):
+            names[a["code"]] = a["name"]
+    for f in feed.get("flights") or []:
+        take(f.get("from"))
+        take(f.get("to"))
+    for l in feed.get("landed") or []:
+        take(l.get("at"))
+
+
+def competitors(rows):
+    """Rivals ranked by pressure on us: our airports where they are runner-up, plus ones they took."""
+    tally = {}
+
+    def entry(i, name, tag):
+        return tally.setdefault(i, {"id": i, "name": name, "tag": tag, "runner_up": 0,
+                                    "urgent": 0, "at_risk": 0, "took": 0, "holds": None})
+    for r in rows:
+        if r["status"] == "held":
+            c = entry(r["runner_up_id"], r["runner_up"], r["runner_up_tag"])
+            c["runner_up"] += 1
+            if r["risk"] in ("urgent", "at_risk"):
+                c[r["risk"]] += 1
+        elif r["status"] == "lost":
+            entry(r["holder_id"], r["holder"], r["holder_tag"])["took"] += 1
+    return sorted(tally.values(), key=lambda c: (-(c["runner_up"] + c["took"]), -(c["urgent"] + c["took"]), c["name"]))
+
+
 def build_row(code, company_id, standings):
     """One panel row from a /api/standings payload."""
     cid = str(company_id)
@@ -70,21 +119,23 @@ def build_row(code, company_id, standings):
         return c.get("name") or str(i), c.get("tag") or ""
 
     if not entries:
-        return {"code": code, "status": "error", "note": "no standings returned"}
+        return {"code": code, "status": "error", "risk": "error", "note": "no standings returned"}
     top = entries[0]
     holder_name, holder_tag = name(top["id"])
-    row = {"code": code, "holder": holder_name, "holder_tag": holder_tag, "value": top["value"]}
+    row = {"code": code, "holder": holder_name, "holder_tag": holder_tag, "holder_id": str(top["id"]),
+           "value": top["value"]}
     if str(top["id"]) == cid:
         if len(entries) > 1:
             ru = entries[1]
             ru_name, ru_tag = name(ru["id"])
-            row.update(status="held", margin=top["value"] - ru["value"],
-                       runner_up=ru_name, runner_up_tag=ru_tag, runner_up_value=ru["value"])
+            margin = top["value"] - ru["value"]
+            row.update(status="held", margin=margin, risk=risk_level(margin),
+                       runner_up=ru_name, runner_up_tag=ru_tag, runner_up_id=str(ru["id"]))
         else:
-            row.update(status="safe", margin=top["value"], note="no competitors")
+            row.update(status="safe", risk="safe", margin=top["value"], note="no competitors")
     else:
         ours = next((e["value"] for e in entries if str(e["id"]) == cid), 0)
-        row.update(status="lost", margin=top["value"] - ours, our_value=ours,
+        row.update(status="lost", risk="lost", margin=top["value"] - ours, our_value=ours,
                    note="no longer the holder")
     return row
 
@@ -97,8 +148,12 @@ def sort_rows(rows):
     return sorted(rows, key=lambda r: (_ORDER[r["status"]], r.get("margin", 0), r["code"]))
 
 
-def build_panel(company_id, fetch=fetch_json, sleep=time.sleep, progress=None):
+def build_panel(company_id, fetch=fetch_json, sleep=time.sleep, progress=None, names=None,
+                base_names=None):
+    names = {} if names is None else names
+    base_names = base_names or {}
     co_feed = fetch(f"/api/air/co{urllib.parse.quote(str(company_id), safe='')}")
+    collect_names(co_feed, names)
     codes = held_codes(co_feed, company_id)
     rows = []
     failures = 0
@@ -111,10 +166,25 @@ def build_panel(company_id, fetch=fetch_json, sleep=time.sleep, progress=None):
             rows.append(build_row(code, company_id, standings))
             failures = 0
         except Exception as e:  # keep the panel useful if one airport fails
-            rows.append({"code": code, "status": "error", "note": describe_error(e)})
+            rows.append({"code": code, "status": "error", "risk": "error", "note": describe_error(e)})
             failures += 1
             if failures >= MAX_CONSECUTIVE_FAILURES:  # upstream unhappy: stop hitting it
                 raise RuntimeError(f"aborted after {failures} consecutive failures ({describe_error(e)})")
     if progress:
         progress(len(codes), len(codes))
-    return {"as_of": time.time(), "held_count": len(codes), "rows": sort_rows(rows)}
+    rows = sort_rows(rows)
+    rivals = competitors(rows)[:TOP_COMPETITORS]
+    for c in rivals:  # one small call per top rival: how many airports they hold
+        sleep(REQUEST_SPACING_S)
+        try:
+            feed = fetch("/api/air/co" + urllib.parse.quote(c["id"], safe=""))
+            c["holds"] = len(feed.get("held") or {})
+            collect_names(feed, names)
+        except Exception:
+            c["holds"] = None
+    for r in rows:
+        name = names.get(r["code"]) or base_names.get(r["code"])
+        if name:
+            r["name"] = name
+    return {"as_of": time.time(), "company_id": str(company_id), "held_count": len(codes),
+            "summary": summarize(rows), "rivals": rivals, "rows": rows}

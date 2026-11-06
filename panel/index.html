@@ -2,33 +2,65 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Our Airports</title>
 <style>
-:root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--line:#ddd;--bad:#c0392b;--warn:#b9770e;--ok:#1e8449}
-@media (prefers-color-scheme:dark){:root{--bg:#161616;--fg:#eee;--mut:#999;--line:#333;--bad:#ff6b5b;--warn:#f0b34a;--ok:#5fd08a}}
-body{font:15px system-ui,sans-serif;background:var(--bg);color:var(--fg);margin:0;padding:16px;max-width:900px;margin-inline:auto}
-header{display:flex;gap:12px;align-items:center;flex-wrap:wrap}h1{font-size:20px;margin:0}
+:root{--bg:#fff;--card:#f6f6f6;--fg:#1a1a1a;--mut:#666;--line:#ddd;--lost:#c0392b;--urgent:#d35400;--risk:#b9770e;--ok:#1e8449;--safe:#2874a6}
+@media (prefers-color-scheme:dark){:root{--bg:#161616;--card:#222;--fg:#eee;--mut:#999;--line:#333;--lost:#ff6b5b;--urgent:#ff9a4d;--risk:#f0b34a;--ok:#5fd08a;--safe:#6bb6e8}}
+*{box-sizing:border-box}
+body{font:15px system-ui,sans-serif;background:var(--bg);color:var(--fg);margin:0;padding:16px;max-width:960px;margin-inline:auto}
+header{display:flex;gap:12px;align-items:center;flex-wrap:wrap}h1{font-size:20px;margin:0}h2{font-size:15px;margin:18px 0 6px}
 button{font:inherit;padding:6px 14px;cursor:pointer}#meta{color:var(--mut)}
-table{width:100%;border-collapse:collapse;margin-top:12px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
-td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}.lost{color:var(--bad);font-weight:600}.held{color:var(--warn)}.safe{color:var(--ok)}
-.wrap{overflow-x:auto}
+#tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-top:14px}
+.tile{background:var(--card);border:2px solid transparent;border-left:6px solid var(--c);border-radius:8px;padding:10px 12px;text-align:left;color:var(--fg)}
+.tile.on{border-color:var(--c)}
+.tile b{display:block;font-size:28px;line-height:1.1;color:var(--c)}.tile span{color:var(--mut);font-size:13px}
+.lost{--c:var(--lost)}.urgent{--c:var(--urgent)}.at_risk{--c:var(--risk)}.ok{--c:var(--ok)}.safe{--c:var(--safe)}.error{--c:var(--mut)}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}td.s{color:var(--c);font-weight:600}
+.wrap{overflow:auto;max-height:340px;border:1px solid var(--line);border-radius:6px}
+thead th{position:sticky;top:0;background:var(--bg)}
+details summary{cursor:pointer;margin:18px 0 6px;font-weight:600}
 </style></head><body>
-<header><h1>Our airports</h1><button id="go">Refresh</button><span id="meta">Not loaded yet. Press Refresh.</span></header>
-<div class="wrap"><table><thead><tr><th>Airport</th><th>Holder</th><th class="n">Value</th><th>Runner-up</th><th class="n">Margin</th><th>Status</th></tr></thead><tbody id="rows"></tbody></table></div>
+<header><h1>Our airports</h1><button id="go" title="Re-fetch from the game and replace the cached data">Refresh</button><span id="meta">Loading…</span></header>
+<div id="tiles"></div>
+<div id="rivalbox" hidden><h2>Biggest rivals <span style="font-weight:400;color:var(--mut)">(ranked by pressure on our airports)</span></h2>
+<div class="wrap" style="max-height:none"><table><thead><tr><th>Rival</th><th class="n">Runner-up on</th><th class="n">Urgent</th><th class="n">At risk</th><th class="n">Took from us</th><th class="n">Holds</th></tr></thead><tbody id="rivals"></tbody></table></div></div>
+<h2>Most at risk</h2>
+<div class="wrap" style="max-height:none"><table><thead><tr><th>Airport</th><th>Holder</th><th>Runner-up</th><th class="n">Margin</th><th>Status</th></tr></thead><tbody id="top"></tbody></table></div>
+<details id="all"><summary id="allsum">All airports</summary>
+<div class="wrap"><table><thead><tr><th>Airport</th><th>Holder</th><th>Runner-up</th><th class="n">Margin</th><th>Status</th></tr></thead><tbody id="rows"></tbody></table></div></details>
 <script>
 const $=id=>document.getElementById(id), usd=n=>n==null?'':'$'+Number(n).toLocaleString();
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const who=(n,t)=>esc(n)+(t?` [${esc(t)}]`:'');
+const LABEL={lost:'Lost',urgent:'Urgent (< $2,000)',at_risk:'At risk (< $5,000)',ok:'Secure',safe:'No competitors',error:'Errors'};
+let filter=null,last=null;
+const apt=r=>esc(r.code)+(r.name?` <span style="color:var(--mut)">${esc(r.name)}</span>`:'');
+function row(r){
+  const lab=r.risk==='lost'?'LOST':r.risk==='urgent'?'URGENT':r.risk==='at_risk'?'At risk':r.risk==='safe'?'Safe: no competitors':r.risk==='error'?esc(r.note):'Secure';
+  return `<tr><td>${apt(r)}</td><td>${r.holder?who(r.holder,r.holder_tag):''}</td>`+
+    `<td>${r.runner_up?who(r.runner_up,r.runner_up_tag):''}</td><td class="n">${r.margin==null?'':usd(r.margin)}</td>`+
+    `<td class="s ${r.risk}">${lab}</td></tr>`}
+function draw(){
+  const p=last&&last.panel; if(!p)return;
+  const sm=p.summary, order=['lost','urgent','at_risk','ok','safe','error'];
+  $('tiles').innerHTML=order.filter(k=>k!=='error'||sm.error).map(k=>
+    `<button class="tile ${k}${filter===k?' on':''}" data-k="${k}"><b>${sm[k]}</b><span>${LABEL[k]}</span></button>`).join('');
+  document.querySelectorAll('.tile').forEach(t=>t.onclick=()=>{filter=filter===t.dataset.k?null:t.dataset.k;if(filter)$('all').open=true;draw()});
+  const rv=p.rivals||[];
+  $('rivalbox').hidden=!rv.length;
+  $('rivals').innerHTML=rv.map(c=>`<tr><td>${who(c.name,c.tag)}</td><td class="n">${c.runner_up}</td>`+
+    `<td class="n">${c.urgent}</td><td class="n">${c.at_risk}</td><td class="n">${c.took}</td>`+
+    `<td class="n">${c.holds==null?'?':c.holds}</td></tr>`).join('');
+  $('top').innerHTML=p.rows.filter(r=>r.risk!=='error').slice(0,5).map(row).join('');
+  const rows=filter?p.rows.filter(r=>r.risk===filter):p.rows;
+  $('rows').innerHTML=rows.map(row).join('');
+  $('allsum').textContent=filter?`${LABEL[filter]}: ${rows.length} airports (click the tile again to clear)`:`All airports (${p.rows.length})`;
+}
 function render(s){
-  if(s.panel){
-    $('rows').innerHTML=s.panel.rows.map(r=>{
-      const st=r.status==='lost'?'LOST: behind by':r.status==='safe'?'No competitors (safe)':r.status==='error'?esc(r.note):'Held';
-      return `<tr><td>${esc(r.code)}</td><td>${r.holder?who(r.holder,r.holder_tag):''}</td><td class="n">${usd(r.value)}</td>`+
-        `<td>${r.runner_up?who(r.runner_up,r.runner_up_tag)+' '+usd(r.runner_up_value):''}</td>`+
-        `<td class="n">${r.margin==null?'':usd(r.margin)}</td><td class="${r.status}">${st}</td></tr>`}).join('');
-  }
-  const p=s.progress||[0,0];
-  const asof=s.panel?` · showing data as of ${new Date(s.panel.as_of*1000).toLocaleTimeString()}`:'';
-  $('meta').textContent=s.running?`Refreshing… ${p[0]}/${p[1]} airports`:s.error?'Error: '+s.error+asof:
-    s.panel?`${s.panel.held_count} airports held · data as of ${new Date(s.panel.as_of*1000).toLocaleTimeString()}`:'Not loaded yet. Press Refresh.';
+  last=s;draw();
+  const p=s.progress||[0,0], t=s.panel?new Date(s.panel.as_of*1000).toLocaleString():'';
+  $('meta').textContent=s.running?`Refreshing… ${p[0]}/${p[1]} airports`:
+    s.error?`Error: ${s.error}`+(t?` · showing cached data from ${t}`:''):
+    s.panel?`${s.panel.held_count} airports held · data from ${t} (cached)`:'No data yet. Press Refresh.';
   $('go').disabled=s.running;
 }
 async function poll(){
