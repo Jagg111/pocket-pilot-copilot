@@ -12,61 +12,95 @@ button{font:inherit;padding:6px 14px;cursor:pointer}#meta{color:var(--mut)}
 .tile{background:var(--card);border:2px solid transparent;border-left:6px solid var(--c);border-radius:8px;padding:10px 12px;text-align:left;color:var(--fg)}
 .tile.on{border-color:var(--c)}
 .tile b{display:block;font-size:28px;line-height:1.1;color:var(--c)}.tile span{color:var(--mut);font-size:13px}
-.lost{--c:var(--lost)}.urgent{--c:var(--urgent)}.at_risk{--c:var(--risk)}.ok{--c:var(--ok)}.safe{--c:var(--safe)}.error{--c:var(--mut)}
+.lost{--c:var(--lost)}.urgent{--c:var(--urgent)}.at_risk{--c:var(--risk)}.ok{--c:var(--ok)}.error{--c:var(--mut)}.total{--c:var(--fg)}
 table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
-td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}td.s{color:var(--c);font-weight:600}
+.pill{display:inline-block;font-size:11px;font-weight:600;border-radius:10px;padding:1px 7px;margin-left:4px;border:1px solid var(--c)}
+.pill.u{--c:var(--urgent);color:var(--urgent)}.pill.r{--c:var(--risk);color:var(--risk)}.pill.c{--c:var(--safe);color:var(--safe)}
+#flights td{white-space:normal}td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}td.s{color:var(--c);font-weight:600}
 .wrap{overflow:auto;max-height:340px;border:1px solid var(--line);border-radius:6px}
 thead th{position:sticky;top:0;background:var(--bg)}
 details summary{cursor:pointer;margin:18px 0 6px;font-weight:600}
 </style></head><body>
 <header><h1>Our airports</h1><button id="go" title="Re-fetch from the game and replace the cached data">Refresh</button><span id="meta">Loading…</span></header>
 <div id="tiles"></div>
-<div id="rivalbox" hidden><h2>Biggest rivals <span style="font-weight:400;color:var(--mut)">(ranked by pressure on our airports)</span></h2>
-<div class="wrap" style="max-height:none"><table><thead><tr><th>Rival</th><th class="n">Runner-up on</th><th class="n">Urgent</th><th class="n">At risk</th><th class="n">Took from us</th><th class="n">Holds</th></tr></thead><tbody id="rivals"></tbody></table></div></div>
-<h2>Most at risk</h2>
-<div class="wrap" style="max-height:none"><table><thead><tr><th>Airport</th><th>Holder</th><th>Runner-up</th><th class="n">Margin</th><th>Status</th></tr></thead><tbody id="top"></tbody></table></div>
+<h2>Pilots in the air <span id="fcount" style="font-weight:400;color:var(--mut)"></span> <button id="fgo" style="padding:2px 10px;font-size:13px" title="One small call: updates only this board">Refresh flights</button></h2>
+<div class="wrap" style="max-height:none"><table><thead><tr><th>Callsign</th><th>Plane</th><th>From</th><th>To</th><th class="n">Time left</th></tr></thead><tbody id="flights"><tr><td colspan="5" style="color:var(--mut)">No flight data yet.</td></tr></tbody></table></div>
+<h2>Most at risk <span style="font-weight:400;color:var(--mut)">(urgent, at-risk and lost airports, highest value first)</span></h2>
+<div class="wrap" style="max-height:none"><table><thead><tr><th>Airport</th><th>Holder</th><th class="n">Value</th><th>Runner-up</th><th class="n">Margin</th><th>Status</th></tr></thead><tbody id="top"></tbody></table></div>
 <details id="all"><summary id="allsum">All airports</summary>
-<div class="wrap"><table><thead><tr><th>Airport</th><th>Holder</th><th>Runner-up</th><th class="n">Margin</th><th>Status</th></tr></thead><tbody id="rows"></tbody></table></div></details>
+<div class="wrap"><table><thead><tr><th>Airport</th><th>Holder</th><th class="n">Value</th><th>Runner-up</th><th class="n">Margin</th><th>Status</th></tr></thead><tbody id="rows"></tbody></table></div></details>
+<details id="rivalbox" hidden><summary>Biggest rivals <span style="font-weight:400;color:var(--mut)">(ranked by pressure on our airports)</span></summary>
+<div class="wrap" style="max-height:none"><table><thead><tr><th>Rival</th><th class="n">Runner-up on</th><th class="n">Urgent</th><th class="n">At risk</th><th class="n">Took from us</th><th class="n">Holds</th></tr></thead><tbody id="rivals"></tbody></table></div></details>
+
 <script>
 const $=id=>document.getElementById(id), usd=n=>n==null?'':'$'+Number(n).toLocaleString();
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const who=(n,t)=>esc(n)+(t?` [${esc(t)}]`:'');
-const LABEL={lost:'Lost',urgent:'Urgent (< $2,000)',at_risk:'At risk (< $5,000)',ok:'Secure',safe:'No competitors',error:'Errors'};
+const LABEL={lost:'Lost',urgent:'Urgent (< $10,000)',at_risk:'At risk (< $20,000)',ok:'Secure',error:'Errors'};
 let filter=null,last=null;
 const apt=r=>esc(r.code)+(r.name?` <span style="color:var(--mut)">${esc(r.name)}</span>`:'');
 function row(r){
-  const lab=r.risk==='lost'?'LOST':r.risk==='urgent'?'URGENT':r.risk==='at_risk'?'At risk':r.risk==='safe'?'Safe: no competitors':r.risk==='error'?esc(r.note):'Secure';
-  return `<tr><td>${apt(r)}</td><td>${r.holder?who(r.holder,r.holder_tag):''}</td>`+
-    `<td>${r.runner_up?who(r.runner_up,r.runner_up_tag):''}</td><td class="n">${r.margin==null?'':usd(r.margin)}</td>`+
+  const lab=r.risk==='lost'?'LOST':r.risk==='urgent'?'URGENT':r.risk==='at_risk'?'At risk':r.risk==='error'?esc(r.note):'Secure';
+  return `<tr><td>${apt(r)}</td><td>${r.holder?who(r.holder,r.holder_tag):''}</td><td class="n">${usd(r.value)}</td>`+
+    `<td>${r.runner_up?who(r.runner_up,r.runner_up_tag):(r.risk==='ok'&&r.holder?'<span style="color:var(--mut)">none</span>':'')}</td><td class="n">${r.margin==null?'':usd(r.margin)}</td>`+
     `<td class="s ${r.risk}">${lab}</td></tr>`}
+const cap=s=>s?s[0].toUpperCase()+s.slice(1):'';
+const place=(c,n)=>esc(c||'?')+(n?` <span style="color:var(--mut)">${esc(n)}</span>`:'');
+function left(f,p){
+  const feedNow=p.flights_now+(Date.now()-p.flights_as_of*1000);  // ms, server clock at fetch + time since
+  const rem=f.eta-(feedNow-f.t0)/1000;
+  if(rem<=60)return rem<=-300?'landed?':'landing';
+  const m=Math.round(rem/60),h=Math.floor(m/60);
+  return h?`${h}h ${m%60}m`:`${m}m`;
+}
+function drawFlights(){
+  const p=last&&last.panel; if(!p||!p.flights)return;
+  const fl=p.flights.slice().sort((a,b)=>(a.t0+a.eta*1000)-(b.t0+b.eta*1000));
+  $('fcount').textContent=`(${fl.length} · data from ${new Date(p.flights_as_of*1000).toLocaleTimeString()})`;
+  const risk={};(p.rows||[]).forEach(r=>{if(r.risk==='urgent'||r.risk==='at_risk'||r.risk==='lost')risk[r.code]=r.risk});
+  const cue={urgent:'<span class="pill u">URGENT airport</span>',at_risk:'<span class="pill r">At-risk airport</span>',lost:'<span class="pill u">Lost airport</span>'};
+  $('flights').innerHTML=fl.length?fl.map(f=>`<tr><td>${esc(f.cs)}</td>`+
+    `<td>${esc(cap(f.type))}${f.company_plane?' <span class="pill c" title="Painted in our exact company livery">Company</span>':''}</td>`+
+    `<td>${place(f.from_code,f.from_name)}</td><td>${place(f.to_code,f.to_name)}${risk[f.to_code]?' '+cue[risk[f.to_code]]:''}</td><td class="n">${left(f,p)}</td></tr>`).join(''):
+    '<tr><td colspan="5" style="color:var(--mut)">Nobody is flying right now.</td></tr>';
+}
+setInterval(drawFlights,15000);
 function draw(){
+  drawFlights();
   const p=last&&last.panel; if(!p)return;
-  const sm=p.summary, order=['lost','urgent','at_risk','ok','safe','error'];
-  $('tiles').innerHTML=order.filter(k=>k!=='error'||sm.error).map(k=>
+  const sm=p.summary, order=['urgent','at_risk','ok','error'].filter(k=>sm[k]);
+  if(sm.lost)order.unshift('lost');  // only shown if an airport has actually flipped
+  const total=`<button class="tile total" data-k=""><b>${p.held_count}</b><span>Airports held · top ${p.checked_count||p.rows.length} by value monitored</span></button>`;
+  $('tiles').innerHTML=total+order.map(k=>
     `<button class="tile ${k}${filter===k?' on':''}" data-k="${k}"><b>${sm[k]}</b><span>${LABEL[k]}</span></button>`).join('');
-  document.querySelectorAll('.tile').forEach(t=>t.onclick=()=>{filter=filter===t.dataset.k?null:t.dataset.k;if(filter)$('all').open=true;draw()});
+  document.querySelectorAll('.tile').forEach(t=>t.onclick=()=>{filter=(!t.dataset.k||filter===t.dataset.k)?null:t.dataset.k;if(filter)$('all').open=true;draw()});
   const rv=p.rivals||[];
   $('rivalbox').hidden=!rv.length;
   $('rivals').innerHTML=rv.map(c=>`<tr><td>${who(c.name,c.tag)}</td><td class="n">${c.runner_up}</td>`+
     `<td class="n">${c.urgent}</td><td class="n">${c.at_risk}</td><td class="n">${c.took}</td>`+
     `<td class="n">${c.holds==null?'?':c.holds}</td></tr>`).join('');
   $('top').innerHTML=p.rows.filter(r=>r.risk!=='error').slice(0,5).map(row).join('');
-  const rows=filter?p.rows.filter(r=>r.risk===filter):p.rows;
+  const rows=(filter?p.rows.filter(r=>r.risk===filter):p.rows.slice()).sort((a,b)=>(b.value||0)-(a.value||0));
   $('rows').innerHTML=rows.map(row).join('');
-  $('allsum').textContent=filter?`${LABEL[filter]}: ${rows.length} airports (click the tile again to clear)`:`All airports (${p.rows.length})`;
+  $('allsum').textContent=filter?`${LABEL[filter]}: ${rows.length} airports (click the tile again to clear)`:`Checked airports by value (${p.rows.length})`;
 }
 function render(s){
   last=s;draw();
   const p=s.progress||[0,0], t=s.panel?new Date(s.panel.as_of*1000).toLocaleString():'';
   $('meta').textContent=s.running?`Refreshing… ${p[0]}/${p[1]} airports`:
     s.error?`Error: ${s.error}`+(t?` · showing cached data from ${t}`:''):
-    s.panel?`${s.panel.held_count} airports held · data from ${t} (cached)`:'No data yet. Press Refresh.';
+    s.panel?`${s.panel.held_count} airports held`+(s.panel.checked_count&&s.panel.checked_count<s.panel.held_count?` · top ${s.panel.checked_count} by value checked`:'')+` · data from ${t} (cached)`:'No data yet. Press Refresh.';
   $('go').disabled=s.running;
 }
 async function poll(){
   try{const s=await (await fetch('/api/panel')).json();render(s);if(s.running)setTimeout(poll,1500)}
   catch(e){$('meta').textContent='Cannot reach the local server.';$('go').disabled=false}
 }
+$('fgo').onclick=async()=>{
+  $('fgo').disabled=true;
+  try{await fetch('/api/refresh-flights',{method:'POST',headers:{'X-Panel':'1'}})}catch(e){}
+  setTimeout(async()=>{await poll();$('fgo').disabled=false},1500)
+};
 $('go').onclick=async()=>{
   $('go').disabled=true;
   try{await fetch('/api/refresh',{method:'POST',headers:{'X-Panel':'1'}})}catch(e){}

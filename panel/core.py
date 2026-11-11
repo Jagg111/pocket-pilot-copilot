@@ -10,9 +10,10 @@ BASE = "https://pilots.nimblebit.com"
 REQUEST_SPACING_S = 1.0
 MAX_TRIES = 3
 MAX_CONSECUTIVE_FAILURES = 3
+TOP_AIRPORTS = int(os.environ.get("PP_TOP_AIRPORTS", "20"))  # standings calls per refresh
 TOP_COMPETITORS = 3  # extra /api/air/co<id> calls per refresh
-URGENT_BELOW = 2000
-AT_RISK_BELOW = 5000
+URGENT_BELOW = 10000
+AT_RISK_BELOW = 20000
 
 
 def user_agent():
@@ -63,7 +64,7 @@ def held_codes(co_feed, company_id):
 
 
 def risk_level(margin):
-    """urgent below $2,000, at_risk below $5,000, else ok."""
+    """urgent below $10,000, at_risk below $20,000, else ok."""
     if margin < URGENT_BELOW:
         return "urgent"
     if margin < AT_RISK_BELOW:
@@ -72,7 +73,7 @@ def risk_level(margin):
 
 
 def summarize(rows):
-    counts = {"lost": 0, "urgent": 0, "at_risk": 0, "ok": 0, "safe": 0, "error": 0}
+    counts = {"lost": 0, "urgent": 0, "at_risk": 0, "ok": 0, "error": 0}
     for r in rows:
         counts[r.get("risk") or "error"] += 1
     return counts
@@ -98,7 +99,7 @@ def competitors(rows):
         return tally.setdefault(i, {"id": i, "name": name, "tag": tag, "runner_up": 0,
                                     "urgent": 0, "at_risk": 0, "took": 0, "holds": None})
     for r in rows:
-        if r["status"] == "held":
+        if r["status"] == "held" and r.get("runner_up_id"):
             c = entry(r["runner_up_id"], r["runner_up"], r["runner_up_tag"])
             c["runner_up"] += 1
             if r["risk"] in ("urgent", "at_risk"):
@@ -106,6 +107,46 @@ def competitors(rows):
         elif r["status"] == "lost":
             entry(r["holder_id"], r["holder"], r["holder_tag"])["took"] += 1
     return sorted(tally.values(), key=lambda c: (-(c["runner_up"] + c["took"]), -(c["urgent"] + c["took"]), c["name"]))
+
+
+def flights_from_feed(feed, company_id):
+    """Our pilots' active flights. Callsign, plane, route, timing; no pilot IDs kept."""
+    cid = str(company_id)
+    out = []
+    for f in feed.get("flights") or []:
+        if str(f.get("co", cid)) != cid:
+            continue
+        a, b = f.get("from") or {}, f.get("to") or {}
+        out.append({"cs": f.get("cs"), "type": f.get("type"), "reg": f.get("reg"),
+                    "from_code": a.get("code"), "from_name": a.get("name"),
+                    "to_code": b.get("code"), "to_name": b.get("name"),
+                    "t0": f.get("t0"), "eta": f.get("eta"), "paint": f.get("paint")})
+    return out
+
+
+def paint_key(paint):
+    """Company paint dict {body,trim,accent} -> the flight feed's 18-hex-char paint string."""
+    try:
+        return "".join(paint[k].lstrip("#") for k in ("body", "trim", "accent")).lower()
+    except (KeyError, TypeError, AttributeError):
+        return None
+
+
+def mark_company_planes(flights, company_paint):
+    """Flag flights painted in exactly our company livery. A strong hint, not proof of ownership."""
+    key = paint_key(company_paint)
+    for f in flights:
+        f["company_plane"] = bool(key) and (f.get("paint") or "").lower() == key
+    return flights
+
+
+def top_held(co_feed, company_id, n):
+    """Our n highest-value held airports (value is in the co feed, so no extra calls)."""
+    held = co_feed.get("held") or {}
+    cid = str(company_id)
+    mine = [(c, h.get("v") or 0) for c, h in held.items() if str(h.get("co", cid)) == cid]
+    mine.sort(key=lambda x: (-x[1], x[0]))
+    return [c for c, _ in mine[:n]], len(mine)
 
 
 def build_row(code, company_id, standings):
@@ -132,7 +173,8 @@ def build_row(code, company_id, standings):
             row.update(status="held", margin=margin, risk=risk_level(margin),
                        runner_up=ru_name, runner_up_tag=ru_tag, runner_up_id=str(ru["id"]))
         else:
-            row.update(status="safe", risk="safe", margin=top["value"], note="no competitors")
+            # uncontested: nothing to lose, counts as secure
+            row.update(status="held", risk="ok", margin=top["value"], note="no competitors")
     else:
         ours = next((e["value"] for e in entries if str(e["id"]) == cid), 0)
         row.update(status="lost", risk="lost", margin=top["value"] - ours, our_value=ours,
@@ -140,23 +182,49 @@ def build_row(code, company_id, standings):
     return row
 
 
-_ORDER = {"lost": 0, "held": 1, "safe": 2, "error": 3}
+_ATTENTION = ("lost", "urgent", "at_risk")
+
+
+def reclassify(panel):
+    """Re-apply current thresholds, top-N scope and ordering to a panel built earlier (cache)."""
+    rows = sorted(panel["rows"], key=lambda r: (-r.get("value", 0), r["code"]))[:TOP_AIRPORTS]
+    for r in rows:
+        if r["status"] == "safe":  # old caches: uncontested is now just secure
+            r["status"], r["risk"] = "held", "ok"
+        elif r["status"] == "held" and r.get("runner_up_id"):
+            r["risk"] = risk_level(r["margin"])
+    panel["rows"] = sort_rows(rows)
+    panel["checked_count"] = len(rows)
+    panel["summary"] = summarize(rows)
+    fresh = {c["id"]: c for c in competitors(rows)}
+    for c in panel.get("rivals") or []:
+        f = fresh.get(c["id"], {})
+        for k in ("runner_up", "urgent", "at_risk", "took"):
+            c[k] = f.get(k, 0)
+    return panel
 
 
 def sort_rows(rows):
-    """Risk order: lost first, then contested by ascending margin, then safe, then errors."""
-    return sorted(rows, key=lambda r: (_ORDER[r["status"]], r.get("margin", 0), r["code"]))
+    """Needs-attention airports (lost, urgent, at risk) first, biggest dollar value first;
+    then the rest by thinnest margin, errors last."""
+    def key(r):
+        if r.get("risk") in _ATTENTION:
+            return (0, -r.get("value", 0), r["code"])
+        return (1 if r["status"] == "held" else 2, r.get("margin", 0), r["code"])
+    return sorted(rows, key=key)
 
 
 def build_panel(company_id, fetch=fetch_json, sleep=time.sleep, progress=None, names=None,
-                base_names=None):
+                base_names=None, top_n=None):
     names = {} if names is None else names
     base_names = base_names or {}
     co_feed = fetch(f"/api/air/co{urllib.parse.quote(str(company_id), safe='')}")
     collect_names(co_feed, names)
-    codes = held_codes(co_feed, company_id)
+    flights = flights_from_feed(co_feed, company_id)
+    codes, total_held = top_held(co_feed, company_id, TOP_AIRPORTS if top_n is None else top_n)
     rows = []
     failures = 0
+    company_paint = None
     for i, code in enumerate(codes):
         if progress:
             progress(i, len(codes))
@@ -164,6 +232,7 @@ def build_panel(company_id, fetch=fetch_json, sleep=time.sleep, progress=None, n
         try:
             standings = fetch("/api/standings?code=" + urllib.parse.quote(code, safe=""))
             rows.append(build_row(code, company_id, standings))
+            company_paint = company_paint or ((standings.get("cos") or {}).get(str(company_id)) or {}).get("paint")
             failures = 0
         except Exception as e:  # keep the panel useful if one airport fails
             rows.append({"code": code, "status": "error", "risk": "error", "note": describe_error(e)})
@@ -186,5 +255,7 @@ def build_panel(company_id, fetch=fetch_json, sleep=time.sleep, progress=None, n
         name = names.get(r["code"]) or base_names.get(r["code"])
         if name:
             r["name"] = name
-    return {"as_of": time.time(), "company_id": str(company_id), "held_count": len(codes),
-            "summary": summarize(rows), "rivals": rivals, "rows": rows}
+    return {"as_of": time.time(), "company_id": str(company_id), "held_count": total_held, "checked_count": len(codes),
+            "summary": summarize(rows), "rivals": rivals, "rows": rows,
+            "flights": mark_company_planes(flights, company_paint), "company_paint": company_paint,
+            "flights_now": co_feed.get("now"), "flights_as_of": time.time()}

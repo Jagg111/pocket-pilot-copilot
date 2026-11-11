@@ -22,8 +22,8 @@ A vision and opportunity: our small company in Pocket Pilots sees mostly us-vs-u
   - **intent:** For each held airport the system shows the holder, holder value, runner-up, and margin to the runner-up.
   - **success:** For a sampled airport, margin equals `list[0].value - list[1].value` from `/api/standings` and matches the in-game "2nd is $X behind" or "need $X more" figure.
 - **CAP-3**
-  - **intent:** The panel orders airports by risk, thinnest lead first.
-  - **success:** Given fixture standings, output order is ascending margin; an airport where we are no longer first is flagged lost and listed above all held ones; an airport with no competitor shows our full value as margin, is labelled "no competitors" (safe), and is listed after all contested ones.
+  - **intent:** The panel orders airports by risk: lost, urgent (margin under $10,000) and at-risk (under $20,000) airports first, highest dollar value first, then the rest thinnest lead first; only the top 20 airports by value are monitored.
+  - **success:** Given fixture standings, needs-attention airports are ordered by descending value, then the remainder by ascending margin; an airport where we are no longer first is flagged lost and listed above all held ones; an airport with no competitor shows our full value as margin and counts as Secure, with no separate status.
 - **CAP-4**
   - **intent:** A pilot can view the whole panel as one readable local HTML page with holder name and tag, value, margin, and data age, refreshed on demand.
   - **success:** Opening the page and triggering a refresh renders all rows plus a "data as of" timestamp, using company names from `cos` rather than raw IDs; a refresh issues fresh API calls only when the user requests it.

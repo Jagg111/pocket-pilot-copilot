@@ -6,6 +6,8 @@ import json
 import os
 import sys
 import threading
+import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -16,7 +18,7 @@ HERE = Path(__file__).parent
 CACHE_FILE = HERE / ".cache" / "panel.json"
 NAMES_FILE = HERE / ".cache" / "names.json"
 AIRPORTS_FILE = HERE / ".cache" / "airport_names.json"  # built by fetch_airport_names.py
-STATE = {"panel": None, "running": False, "progress": [0, 0], "error": None}
+STATE = {"panel": None, "running": False, "flights_running": False, "progress": [0, 0], "error": None}
 LOCK = threading.Lock()
 
 
@@ -25,7 +27,7 @@ def load_cache(company_id):
     try:
         panel = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
         if panel.get("company_id") == str(company_id) and "summary" in panel:
-            return panel
+            return core.reclassify(panel)  # pick up threshold/ordering changes
     except (OSError, ValueError):
         pass
     return None
@@ -63,6 +65,35 @@ def load_airport_names():
         return d if isinstance(d, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def refresh_flights(company_id):
+    """One small call: update just the flight board in the current panel."""
+    try:
+        with LOCK:
+            panel = STATE["panel"]
+            paint = panel.get("company_paint") if panel else None
+            first_code = panel["rows"][0]["code"] if panel and panel["rows"] else None
+        if panel is None:
+            with LOCK:
+                STATE["error"] = "Press Refresh first to load the airports."
+            return
+        feed = core.fetch_json("/api/air/co" + urllib.parse.quote(str(company_id), safe=""))
+        if not paint and first_code:  # one extra call, only if we never saw our paint
+            st = core.fetch_json("/api/standings?code=" + urllib.parse.quote(first_code, safe=""))
+            paint = ((st.get("cos") or {}).get(str(company_id)) or {}).get("paint")
+        flights = core.mark_company_planes(core.flights_from_feed(feed, company_id), paint)
+        with LOCK:
+            panel.update(flights=flights, company_paint=paint, flights_now=feed.get("now"),
+                         flights_as_of=time.time())
+            STATE["error"] = None
+        save_cache(panel)
+    except Exception as e:
+        with LOCK:
+            STATE["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        with LOCK:
+            STATE["flights_running"] = False
 
 
 def refresh(company_id):
@@ -126,6 +157,14 @@ class Handler(BaseHTTPRequestHandler):
                     STATE.update(running=True, progress=[0, 0], error=None)
             if start:
                 threading.Thread(target=refresh, args=(self.company_id,), daemon=True).start()
+            self._send(202, "{}", "application/json")
+        elif self.path == "/api/refresh-flights":
+            with LOCK:
+                start = not STATE["flights_running"]
+                if start:
+                    STATE["flights_running"] = True
+            if start:
+                threading.Thread(target=refresh_flights, args=(self.company_id,), daemon=True).start()
             self._send(202, "{}", "application/json")
         else:
             self._send(404, "not found", "text/plain")
