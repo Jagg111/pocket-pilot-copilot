@@ -53,7 +53,9 @@ Everything here was called with no credentials and returned 200.
 | `/api/air/{cell}` | All flights, recent landings, and held airports in one 10-degree grid cell | 20 s | ~25-120 KB | per cell |
 | `/api/air/co<COMPANY_ID>` | **One company's** flights, **all held airports with values**, recent landings, world-wide | 20 s | ~2 KB | 1 per company |
 | `/api/standings?code=<ICAO>` | **Full airport leaderboard**: every company's dollar value, sorted, with names | 30 s | ~0.4 KB | 1 per airport |
-| `/api/tables?region=US` | Top-25 regional company table, weekly dollars | 60 s | ~1.3 KB | 1 per region |
+| `/api/tables?region=<COUNTRY>` | Top-25 company table (country code, or `world`), weekly dollars | 60 s | ~1.3 KB | 1 per region |
+| `/api/find/{callsign}` | One pilot's current flight and recent landings | 20 s | ~0.5 KB | 1 per lookup |
+| `/api/filed/{pilotId}` | Track plus flight-plan snapshot (ATC center, phase, mode) | none | ~50 KB | 1 per flight, use sparingly |
 | `/api/track/{pilotId}` | A flight's **entire planned path** (position and altitude over time) | 30 s | ~14 KB | 1 per flight |
 | `/api/wx/{cell}` | Weather stations (METAR-style) | 120 s | ~1-5 KB | per cell |
 | `/api/patrons` | Landmark patrons | 30 s | ~1-4 KB | 1 |
@@ -107,14 +109,39 @@ The `code` is the **airport code** (the response echoes it). The game also sends
 - This is the **runner-up and margin data**. Both numbers the game shows ("2nd is $8,700 behind", "need $8,701 more to take it") are computable from `list`.
 - Example from the samples: at one airport we were 2nd, $8,700 behind a leader with $24,600. At another we were 1st with $61,020 against a runner-up with $7,005.
 
-### `/api/tables?region=US` (public)
+### `/api/tables?region=<COUNTRY>` (public)
 ```json
 {"region":"US","list":[{"id":"<COMPANY_ID>","value":47231380}, "... 25 entries"],
  "cos":{"<COMPANY_ID>":{"id":"...","name":"...","tag":"...","paint":{...},"livery":0}}}
 ```
-- A **regional company table**, weekly value in dollars, 25 entries, sorted. The game shows the first 8.
-- Deeper than the global `world.table` (15 teams), but still only a top list. **Our company was not in the US top 25.**
-- Only `region=US` was tested. Other region values were not tried.
+- A company table of **weekly value delivered in dollars**, sorted, **capped at 25 entries** (every request tested returned exactly 25).
+- **Region values:** `US` and `CA` (country codes) work. `world`, and also no `region` at all, return the **world** table, whose #1 value matches the in-game world table (75.4 M in the sample). The game derives the region from the country of the airport the pilot is at, then shows the first 8 entries.
+- The world table here has 25 entries, versus 15 in `/api/world` `table`.
+- **The game never shows the player's own rank.** Its client code only slices the first 8 (regional) or 12 (world) rows, and no request carries a company ID. Our company was not in the US top 25 or the world top 25.
+- **Regions are ISO country codes only.** The value is uppercased and stripped of non-alphanumerics, so `US-IL` becomes `USIL` and returns an empty list; `us`, `USA` and a numeric code return an empty list or fall back to the world table. `IL` (Israel) returns a short list (8 companies), so small countries show their whole table. **No state, city or DMA level exists.** The client only derives a country code from the airport's country.
+- **No pagination.** Ten variants (`limit`, `n`, `count`, `offset`, `page`, `start`, `skip`, `top`, `all`, `size`) all returned the identical 25 rows. The cap appears fixed on the server.
+
+### Estimating a company's table rank below the top 25 (no endpoint gives it)
+Table value is not a sum of held-airport values. Calibration against `/api/air/co<id>` (sum of `held[].v`), same day:
+
+| Company | Table value | Airports held | Sum of held `v` | Table / sum |
+|---|---|---|---|---|
+| World #1 | 75.4 M | 348 | 59.9 M | 1.26 |
+| World #25 | 11.8 M | 58 | 3.8 M | 3.16 |
+| US #25 | 4.8 M | 25 | 1.0 M | 4.62 |
+| Ours | not in any top 25 | 54 | 0.42 M | unknown |
+
+The ratio is not constant (1.26 to 4.62), because companies also earn value at airports they do not hold. So the sum of held `v` is only a rough proxy: it says we are well below the 25th company, but it cannot give an exact rank or reliably order companies close to us. Building a proxy table would take about one `/api/air/co<id>` call per company in `world.cos` (267 companies), once, then slow refreshes.
+
+### More public endpoints found in the game's client code (tested 2026-11-06)
+These appear in the game's JavaScript. Each was called once without credentials.
+
+- **`/api/find/{callsign}`** (200, `max-age=20`, ~0.5 KB): look up a pilot by callsign. Returns `{now, flights[], landed[]}` in the same shape as the air feed (flights have `pid`, `co`, `from`, `to`, `eta`, and so on). Useful for a "where is <pilot>?" command. Callsign case handling not tested.
+- **`/api/filed/{pilotId}`** (200, `no-store`, ~50 KB): the same `t0`, `trk`, `end`, `rev`, `rw` as `/api/track` (identical values in the test), **plus a `key` string** holding a JSON snapshot of the flight. Seen inside `key`: `f` (aircraft state at the snapshot: lat/lon, altitude, heading, speed, throttle, fuel, gear, autopilot), `plan` (departure and arrival airport with runway, elevation and length; `cruise`; `phase` such as "Cruise"; `mode` such as "SPD 116 · DCT · ALT 6,500 ft"; `toGo`; and **`atc`, which names the real ATC center the flight is with**, for example "Minneapolis Center"), `log`, and `ap` (an approach path). Heavy and not cacheable, so use sparingly. This is the likely source of the in-game ATC radio calls.
+- **`/api/patrons/{landmark}`** (200, `max-age=30`): history of who has held a landmark patronage: `{log:[{n (callsign), pid, paid, t, to?}]}`, newest first. The plain `/api/patrons` gives only the current holder.
+- **`/api/top/{x}?pid=<pilotId>`** (404 `{"error":"no such plane"}` for an airport code): the client reads `seats` from the result, so `{x}` is probably a plane (registration) identifier, not an airport. Not decoded.
+- **`/api/seed/{kind}/{n}`**: `kind` is `board` or `shop` and `n` is the current time divided by a period (a day for `shop`). It looks like a shared random seed for job boards and the shop. Not called.
+- **`/api/invites?code=<code>`**: invite-code check at sign-up. Skip.
 
 ### `/api/track/{pilotId}`
 - The id is a **pilot ID** taken from the feed (any flight's `pid`), not necessarily the signed-in pilot.
@@ -201,7 +228,7 @@ The code is the account: it reads the career and also erases it or performs writ
 
 - **What changes `held[].v` between takeovers?** Over 7.5 minutes only one airport changed, at a takeover. Whether `v` also grows with landings or only moves at takeovers is unknown. It follows the weekly rule above (this week plus half of last), so it probably changes with deliveries. Needs a longer snapshot series (hours, across a Monday rollover).
 - **What do the optional flight keys `low`, `lv` and `wing` mean?** `wing` most likely marks a wingman or formation flight (the flight carrying it flew the same route, about 100 seconds behind a company mate). Not confirmed. `lv` also appears on parked aircraft in the credentialed panel.
-- **Other `/api/tables` regions:** which values exist, and whether a smaller region would include our company?
+- **Beyond the top 25:** no region, state or pagination option found. A table position below 25th is only estimable (see the proxy section). Untried: authenticated variants, and whether the cap differs by country.
 - **`/api/standings` for airports with no contest:** how many entries it can return, and what it returns for an airport nobody holds.
 - **Polling cost:** one `/api/standings` call per airport. Our company alone holds about 54 airports. Polling all of them every 30 seconds is too much for the "don't go crazy" request, so we need a plan: check only airports where the gap is small, spread calls over time, and respect cache lifetimes.
 - **Company size:** not exposed. Airports held and summed value are the best public proxies.
